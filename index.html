@@ -3,241 +3,82 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMART CHAIR AI - WEBCAM</title>
+    <title>Smart Chair Controller</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
-        h1 { color: #2c3e50; margin-bottom: 5px; }
-        .container { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 800px; text-align: center; }
-        .video-container { position: relative; width: 640px; height: 480px; margin: 20px auto; background-color: #000; border-radius: 8px; overflow: hidden; }
-        video, canvas { position: absolute; top: 0; left: 0; width: 640px; height: 480px; transform: scaleX(-1); }
-        canvas { z-index: 10; }
-        .controls { margin: 20px 0; }
-        button { padding: 10px 20px; font-size: 16px; margin: 5px; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; transition: background 0.3s; }
-        #startBtn { background-color: #27ae60; color: white; }
-        #stopBtn { background-color: #e74c3c; color: white; }
-        #bleBtn { background-color: #2980b9; color: white; }
-        button:disabled { background-color: #95a5a6; cursor: not-allowed; }
-        .status-panel { background: #ecf0f1; padding: 15px; border-radius: 8px; margin-top: 15px; text-align: left; }
-        .status-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; color: white; background-color: #95a5a6; }
-        .status-badge.good { background-color: #27ae60; }
-        .status-badge.bad { background-color: #e74c3c; }
-        .alert-text { color: #e74c3c; font-weight: bold; margin-left: 10px;}
-        .info-text { font-size: 14px; color: #7f8c8d; margin-top: 10px;}
-        #dataDisplay { font-family: monospace; background: #2c3e50; color: #ecf0f1; padding: 10px; border-radius: 5px; margin-top: 10px; white-space: pre-wrap; }
+        body { font-family: sans-serif; text-align: center; padding: 20px; }
+        button { padding: 12px 24px; font-size: 16px; margin: 10px; cursor: pointer; border-radius: 8px; border: none; }
+        .btn-connect { background-color: #008CBA; color: white; }
+        .status { font-weight: bold; margin-top: 15px; color: #333; }
     </style>
 </head>
 <body>
 
-    <h1>SMART CHAIR AI</h1>
-    <p>ระบบตรวจจับท่านั่งอัจฉริยะ (วิเคราะห์ผ่านกล้องเว็บแคม)</p>
+    <h2>ระบบควบคุมเก้าอี้อัจฉริยะ (Smart Chair)</h2>
+    <button id="connectBtn" class="btn-connect" onclick="connectBLE()">เชื่อมต่อเก้าอี้ (BLE)</button>
+    <div id="status" class="status">สถานะ: ยังไม่ได้เชื่อมต่อ</div>
 
-    <div class="container">
-        <div class="controls">
-            <button id="startBtn">เปิดกล้อง</button>
-            <button id="stopBtn" disabled>ปิดกล้อง</button>
-            <button id="bleBtn">เชื่อมต่อเก้าอี้ (BLE)</button>
-        </div>
+    <script>
+        // UUID ต้องตรงกับในโค้ด ESP32
+        const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+        const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
-        <div class="status-panel">
-            <strong>สถานะระบบ: </strong> <span id="systemStatus">รอการเปิดกล้อง...</span><br><br>
-            <strong>การประเมินท่านั่ง: </strong> <span id="postureStatus" class="status-badge">WAIT</span>
-            <span id="reasonText" class="alert-text"></span>
-        </div>
+        let bluetoothDevice;
+        let postureCharacteristic;
 
-        <div class="video-container">
-            <video id="webcam" autoplay playsinline></video>
-            <canvas id="outputCanvas" width="640" height="480"></canvas>
-        </div>
+        async function connectBLE() {
+            const statusText = document.getElementById("status");
+            const connectBtn = document.getElementById("connectBtn");
 
-        <div class="status-panel">
-            <strong>ค่าที่ใช้วิเคราะห์ (Real-time):</strong>
-            <div id="dataDisplay">รอการประมวลผล...</div>
-        </div>
-    </div>
-
-    <script type="module">
-        import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
-
-        const HEAD_TILT_LIMIT = 0.10;       
-        const SHOULDER_TILT_LIMIT = 0.12;   
-        const HEAD_BODY_LIMIT = 0.11;       
-        const MA_FRAMES = 5;                
-        const BAD_DURATION_MS = 5000;       
-        const GOOD_DURATION_MS = 400;       
-
-        let history = { headTilt: [], shoulderTilt: [], alignment: [] };
-        let badStartTime = null;
-        let goodStartTime = null;
-        let currentStatus = "WAIT";
-        let bleCharacteristic = null;
-
-        const video = document.getElementById("webcam");
-        const canvas = document.getElementById("outputCanvas");
-        const ctx = canvas.getContext("2d");
-        const startBtn = document.getElementById("startBtn");
-        const stopBtn = document.getElementById("stopBtn");
-        const bleBtn = document.getElementById("bleBtn");
-        const systemStatus = document.getElementById("systemStatus");
-        const postureStatus = document.getElementById("postureStatus");
-        const reasonText = document.getElementById("reasonText");
-        const dataDisplay = document.getElementById("dataDisplay");
-
-        let stream = null;
-        let poseLandmarker = null;
-        let isRunning = false;
-        let animationId = null;
-        let lastVideoTime = -1;
-
-        // ระบบสั่งงาน Bluetooth BLE
-        bleBtn.addEventListener("click", async () => {
             try {
-                const device = await navigator.bluetooth.requestDevice({
+                statusText.innerText = "สถานะ: กำลังค้นหาอุปกรณ์...";
+
+                // สแกนหาอุปกรณ์ชื่อ SmartChair_ESP32
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
                     filters: [{ name: 'SmartChair_ESP32' }],
-                    optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
+                    optionalServices: [SERVICE_UUID]
                 });
-                const server = await device.gatt.connect();
-                const service = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
-                bleCharacteristic = await service.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
-                alert("เชื่อมต่อเก้าอี้ ESP32 สำเร็จ!");
-            } catch (err) {
-                alert("การเชื่อมต่อล้มเหลว: " + err);
-            }
-        });
 
-        function sendBLE(command) {
-            if (bleCharacteristic) {
-                let encoder = new TextEncoder();
-                bleCharacteristic.writeValue(encoder.encode(command)).catch(e => console.log(e));
-            }
-        }
+                statusText.innerText = "สถานะ: กำลังเชื่อมต่อบลูทูธ...";
+                const server = await bluetoothDevice.gatt.connect();
 
-        async function loadModel() {
-            systemStatus.innerText = "กำลังโหลดโมเดล AI...";
-            try {
-                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
-                poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-                        delegate: "GPU"
-                    },
-                    runningMode: "VIDEO",
-                    numPoses: 1
-                });
-                systemStatus.innerText = "ระบบพร้อมใช้งาน (กดเชื่อมต่อ BLE แล้วเปิดกล้องได้เลย)";
+                // เข้าถึง Service และ Characteristic
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                postureCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+                statusText.innerText = "สถานะ: เชื่อมต่อสำเร็จเรียบร้อย!";
+                statusText.style.color = "green";
+                connectBtn.style.backgroundColor = "#4CAF50";
+
+                // เฝ้าระวังกรณีบลูทูธหลุด
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
             } catch (error) {
-                systemStatus.innerText = "เกิดข้อผิดพลาดในการโหลดโมเดล AI";
+                console.error("Error:", error);
+                statusText.innerText = "สถานะ: การเชื่อมต่อล้มเหลว (" + error.message + ")";
+                statusText.style.color = "red";
             }
         }
 
-        function getMovingAverage(arr, val) {
-            arr.push(val);
-            if (arr.length > MA_FRAMES) arr.shift();
-            return arr.reduce((a, b) => a + b) / arr.length;
+        function onDisconnected() {
+            const statusText = document.getElementById("status");
+            const connectBtn = document.getElementById("connectBtn");
+            
+            statusText.innerText = "สถานะ: บลูทูธขาดการเชื่อมต่อ";
+            statusText.style.color = "red";
+            connectBtn.style.backgroundColor = "#008CBA";
         }
 
-        function analyzePosture(landmarks) {
-            const nose = landmarks[0];
-            const leftEye = landmarks[2];
-            const rightEye = landmarks[5];
-            const leftShoulder = landmarks[11];
-            const rightShoulder = landmarks[12];
-
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-            let eyeDistX = Math.abs(leftEye.x - rightEye.x);
-            let rawHeadTilt = eyeDistX > 0 ? Math.abs(leftEye.y - rightEye.y) / eyeDistX : 0;
-            let shoulderDistX = Math.abs(leftShoulder.x - rightShoulder.x);
-            let rawShoulderTilt = shoulderDistX > 0 ? Math.abs(leftShoulder.y - rightShoulder.y) / shoulderDistX : 0;
-            let shoulderCenterX = (leftShoulder.x + rightShoulder.x) / 2;
-            let rawAlignment = Math.abs(nose.x - shoulderCenterX);
-
-            let headTilt = getMovingAverage(history.headTilt, rawHeadTilt);
-            let shoulderTilt = getMovingAverage(history.shoulderTilt, rawShoulderTilt);
-            let alignment = getMovingAverage(history.alignment, rawAlignment);
-
-            dataDisplay.innerText = `Head Tilt : ${headTilt.toFixed(3)}\nShoulder  : ${shoulderTilt.toFixed(3)}\nAlignment : ${alignment.toFixed(3)}`;
-
-            let isBadPosture = false;
-            let reasons = [];
-
-            if (headTilt > HEAD_TILT_LIMIT) { isBadPosture = true; reasons.push("ศีรษะเอียง"); }
-            if (shoulderTilt > SHOULDER_TILT_LIMIT) { isBadPosture = true; reasons.push("ไหล่เอียง"); }
-            if (alignment > HEAD_BODY_LIMIT) { isBadPosture = true; reasons.push("ศีรษะเอียงข้าง"); }
-
-            return { isBadPosture, reasons };
-        }
-
-        async function predictWebcam() {
-            if (!isRunning) return;
-
-            if (video.currentTime !== lastVideoTime) {
-                lastVideoTime = video.currentTime;
-                if (poseLandmarker) {
-                    const results = poseLandmarker.detectForVideo(video, performance.now());
-                    if (results.landmarks && results.landmarks.length > 0) {
-                        systemStatus.innerText = "ระบบกำลังประมวลผล...";
-                        const analysis = analyzePosture(results.landmarks[0]);
-                        const now = performance.now();
-
-                        if (analysis.isBadPosture) {
-                            goodStartTime = null;
-                            if (!badStartTime) badStartTime = now;
-                            let elapsedTime = ((now - badStartTime) / 1000).toFixed(1);
-
-                            if (now - badStartTime > BAD_DURATION_MS) {
-                                currentStatus = "BAD";
-                                postureStatus.innerText = "BAD - ท่านั่งผิด";
-                                postureStatus.className = "status-badge bad";
-                                reasonText.innerText = "- " + analysis.reasons.join(", ");
-                                sendBLE("1");
-                            } else {
-                                postureStatus.innerText = `ตรวจพบการเอียง (${elapsedTime}s/5s)`;
-                                postureStatus.className = "status-badge";
-                            }
-                        } else {
-                            badStartTime = null;
-                            if (!goodStartTime) goodStartTime = now;
-                            if (now - goodStartTime > GOOD_DURATION_MS) {
-                                currentStatus = "GOOD";
-                                postureStatus.innerText = "GOOD - ท่านั่งถูกต้อง";
-                                postureStatus.className = "status-badge good";
-                                reasonText.innerText = "";
-                                sendBLE("0");
-                            }
-                        }
-                    }
-                }
-            }
-            animationId = window.requestAnimationFrame(predictWebcam);
-        }
-
-        startBtn.addEventListener("click", async () => {
+        // ฟังก์ชันสำหรับส่งสถานะท่านั่งไปหา ESP32 ('1' = ท่าผิด, '0' = ท่าปกติ)
+        async function sendPostureStatus(isBadPosture) {
+            if (!postureCharacteristic) return;
             try {
-                stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-                video.srcObject = stream;
-                video.addEventListener("loadeddata", () => {
-                    isRunning = true;
-                    startBtn.disabled = true;
-                    stopBtn.disabled = false;
-                    predictWebcam();
-                });
-            } catch (err) {
-                alert("กรุณาอนุญาตให้ใช้งานกล้อง");
+                const encoder = new TextEncoder();
+                const data = encoder.encode(isBadPosture ? "1" : "0");
+                await postureCharacteristic.writeValue(data);
+            } catch (error) {
+                console.error("ส่งข้อมูลไม่สำเร็จ:", error);
             }
-        });
-
-        stopBtn.addEventListener("click", () => {
-            isRunning = false;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            if (animationId) window.cancelAnimationFrame(animationId);
-            if (stream) stream.getTracks().forEach(track => track.stop());
-            sendBLE("0");
-            postureStatus.innerText = "WAIT";
-            postureStatus.className = "status-badge";
-        });
-
-        loadModel();
+        }
     </script>
 </body>
 </html>
