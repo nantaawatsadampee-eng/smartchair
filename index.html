@@ -1,48 +1,179 @@
-let isFsrError = false; // ตัวแปรเก็บสถานะเซนเซอร์ FSR
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ระบบเก้าอี้อัจฉริยะ (Smart Chair AI)</title>
+  
+  <!-- โหลดไลบรารี MediaPipe Pose และ Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
 
-// ฟังก์ชันเมื่อเชื่อมต่อ BLE สำเร็จ ให้เปิดรับการแจ้งเตือนจาก ESP32
-async function connectBLE() {
-  try {
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ name: 'SmartChair_ESP32' }],
-      optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
-    });
-    
-    const server = await device.gatt.connect();
-    const service = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
-    bleCharacteristic = await service.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background: #f4f6f9; padding: 20px; margin: 0; }
+    h2 { color: #333; margin-bottom: 20px; }
+    .btn { padding: 12px 24px; font-size: 16px; font-weight: bold; color: white; border: none; border-radius: 8px; cursor: pointer; margin: 5px; transition: 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .btn-ble { background-color: #008CBA; }
+    .btn-cam { background-color: #4CAF50; }
+    #statusText { font-size: 22px; font-weight: bold; margin: 15px 0; color: #333; }
+    #bleStatus { font-size: 15px; margin-bottom: 10px; color: #666; }
+    .video-container { position: relative; width: 640px; max-width: 90%; margin: 10px auto; }
+    video, canvas { width: 100%; border-radius: 12px; transform: scaleX(-1); box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+  </style>
+</head>
+<body>
 
-    // เริ่มรับ Notification จาก ESP32
-    await bleCharacteristic.startNotifications();
-    bleCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
-      const value = new TextDecoder().decode(event.target.value);
-      if (value === 'E') {
-        isFsrError = true;  // เซนเซอร์ไม่ถูกสัมผัสครบเกิน 5 วินาที
-      } else {
-        isFsrError = false; // เซนเซอร์สัมผัสปกติ
+  <h2>ระบบเก้าอี้อัจฉริยะ (Smart Chair AI)</h2>
+  
+  <div>
+    <button class="btn btn-ble" onclick="connectBLE()">1. เชื่อมต่อเก้าอี้ (BLE)</button>
+    <button class="btn btn-cam" onclick="startCamera()">2. เปิดกล้อง AI</button>
+  </div>
+
+  <div id="bleStatus">สถานะ BLE: ยังไม่ได้เชื่อมต่อ</div>
+  <div id="statusText">ท่านั่ง: รอเปิดกล้อง...</div>
+
+  <div class="video-container">
+    <video id="input_video" style="display:none;"></video>
+    <canvas id="output_canvas"></canvas>
+  </div>
+
+  <script>
+    let bleDevice, bleCharacteristic;
+    let isFsrError = false;
+    let isAiBad = false;
+    let aiMessage = "";
+
+    // 1. เชื่อมต่อ Web Bluetooth (BLE)
+    async function connectBLE() {
+      try {
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ name: 'SmartChair_ESP32' }],
+          optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
+        });
+
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
+        bleCharacteristic = await service.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
+
+        // เปิดรับ Notification รับค่า 'E' (FSR ไม่ครบ) หรือ 'O' (ปกติ) จาก ESP32
+        await bleCharacteristic.startNotifications();
+        bleCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
+          const value = new TextDecoder().decode(event.target.value);
+          isFsrError = (value === 'E');
+          updateStatusUI();
+        });
+
+        document.getElementById("bleStatus").innerText = "สถานะ BLE: เชื่อมต่อสำเร็จเรียบร้อย! ✅";
+        document.getElementById("bleStatus").style.color = "green";
+      } catch (error) {
+        console.error(error);
+        document.getElementById("bleStatus").innerText = "สถานะ BLE: ล้มเหลว (" + error.message + ")";
+        document.getElementById("bleStatus").style.color = "red";
       }
-      updateStatusUI();
+    }
+
+    // ส่งสัญญาณ BLE ไปยัง ESP32 ('1' = ผิดท่า, '0' = ปกติ)
+    async function sendBLEData(data) {
+      if (bleCharacteristic) {
+        try {
+          const encoder = new TextEncoder();
+          await bleCharacteristic.writeValue(encoder.encode(data));
+        } catch (e) {
+          console.error("BLE Send Error:", e);
+        }
+      }
+    }
+
+    // 2. ตั้งค่า MediaPipe Pose
+    const pose = new Pose({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
     });
 
-    document.getElementById("bleStatus").innerText = "สถานะ BLE: เชื่อมต่อสำเร็จเรียบร้อย! ✅";
-  } catch (error) {
-    console.error(error);
-  }
-}
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
 
-// ฟังก์ชันอัปเดตข้อความบนหน้าจอเว็บ
-function updateStatusUI(isAiBad = false, aiMsg = "") {
-  const statusElement = document.getElementById("statusText");
+    pose.onResults(onResults);
 
-  // หาก FSR เตือน (สัมผัสไม่ครบเกิน 5 วิ) จะขึ้นเตือนเรื่องเซนเซอร์เป็นลำดับแรก
-  if (isFsrError) {
-    statusElement.innerText = "ท่านั่ง: เซนเซอร์ถูกสัมผัสไม่ครบทุกจุด ⚠️";
-    statusElement.style.color = "red";
-  } else if (isAiBad) {
-    statusElement.innerText = "ท่านั่ง: " + aiMsg;
-    statusElement.style.color = "red";
-  } else {
-    statusElement.innerText = "ท่านั่ง: ปกติ ✅";
-    statusElement.style.color = "green";
-  }
-}
+    function onResults(results) {
+      const canvasElement = document.getElementById('output_canvas');
+      const canvasCtx = canvasElement.getContext('2d');
+      canvasElement.width = results.image.width;
+      canvasElement.height = results.image.height;
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.poseLandmarks) {
+        const landmarks = results.poseLandmarks;
+
+        const leftEar = landmarks[7];
+        const rightEar = landmarks[8];
+        const leftShoulder = landmarks[11];
+        const rightShoulder = landmarks[12];
+
+        // ตรวจจับนั่งเอียง (Shoulder Tilt)
+        const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
+        const isTilt = shoulderDiff > 0.045;
+
+        // ตรวจจับหลังค่อม / ก้มคอ (Slouching)
+        const avgEarY = (leftEar.y + rightEar.y) / 2;
+        const avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+        const neckDistance = avgShoulderY - avgEarY;
+        const isSlouch = neckDistance < 0.12;
+
+        isAiBad = isTilt || isSlouch;
+
+        if (isAiBad) {
+          if (isTilt && isSlouch) aiMessage = "เอียง + หลังค่อม ⚠️";
+          else if (isTilt) aiMessage = "นั่งเอียง ⚠️";
+          else if (isSlouch) aiMessage = "หลังค่อม / ก้มคอ ⚠️";
+          sendBLEData("1");
+        } else {
+          aiMessage = "ปกติ ✅";
+          sendBLEData("0");
+        }
+      }
+
+      canvasCtx.restore();
+      updateStatusUI();
+    }
+
+    // 3. อัปเดตข้อความแสดงผลบนหน้าจอ
+    function updateStatusUI() {
+      const statusElement = document.getElementById("statusText");
+
+      if (isFsrError) {
+        statusElement.innerText = "ท่านั่ง: เซนเซอร์ถูกสัมผัสไม่ครบทุกจุด ⚠️";
+        statusElement.style.color = "red";
+      } else if (isAiBad) {
+        statusElement.innerText = "ท่านั่ง: " + aiMessage;
+        statusElement.style.color = "red";
+      } else {
+        statusElement.innerText = "ท่านั่ง: ปกติ ✅";
+        statusElement.style.color = "green";
+      }
+    }
+
+    // 4. สั่งเปิดใช้งานกล้อง
+    function startCamera() {
+      const videoElement = document.getElementById('input_video');
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await pose.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+      });
+      camera.start();
+      document.getElementById("statusText").innerText = "ท่านั่ง: กำลังประมวลผล...";
+    }
+  </script>
+</body>
+</html>
