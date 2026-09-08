@@ -1,179 +1,119 @@
 <!DOCTYPE html>
 <html lang="th">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ระบบเก้าอี้อัจฉริยะ (Smart Chair AI)</title>
-  
-  <!-- โหลดไลบรารี MediaPipe Pose และ Camera Utils -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
-
-  <style>
-    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background: #f4f6f9; padding: 20px; margin: 0; }
-    h2 { color: #333; margin-bottom: 20px; }
-    .btn { padding: 12px 24px; font-size: 16px; font-weight: bold; color: white; border: none; border-radius: 8px; cursor: pointer; margin: 5px; transition: 0.2s; }
-    .btn:hover { opacity: 0.9; }
-    .btn-ble { background-color: #008CBA; }
-    .btn-cam { background-color: #4CAF50; }
-    #statusText { font-size: 22px; font-weight: bold; margin: 15px 0; color: #333; }
-    #bleStatus { font-size: 15px; margin-bottom: 10px; color: #666; }
-    .video-container { position: relative; width: 640px; max-width: 90%; margin: 10px auto; }
-    video, canvas { width: 100%; border-radius: 12px; transform: scaleX(-1); box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Chair AI Web Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f4f4f9; padding: 20px; }
+        .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; background: #007bff; color: white; }
+        button:disabled { background: #ccc; }
+        #status { font-size: 24px; font-weight: bold; margin: 15px 0; color: #28a745; }
+        #video-container { position: relative; width: 100%; display: inline-block; }
+        video, canvas { width: 100%; border-radius: 8px; }
+    </style>
 </head>
 <body>
+    <div class="container">
+        <h2>ระบบเก้าอี้อัจฉริยะ (Smart Chair Web)</h2>
+        <div>
+            <button id="connectBtn" onclick="connectBLE()">1. เชื่อมต่อ Bluetooth</button>
+            <button id="startCamBtn" onclick="startCamera()" disabled>2. เปิดกล้อง AI</button>
+        </div>
+        <div id="bleStatus">สถานะ BLE: ยังไม่ได้เชื่อมต่อ</div>
+        <div id="status">ท่านั่ง: รอเปิดกล้อง...</div>
+        
+        <div id="video-container">
+            <video id="webcam" autoplay playsinline style="display:none;"></video>
+            <canvas id="output_canvas"></canvas>
+        </div>
+    </div>
 
-  <h2>ระบบเก้าอี้อัจฉริยะ (Smart Chair AI)</h2>
-  
-  <div>
-    <button class="btn btn-ble" onclick="connectBLE()">1. เชื่อมต่อเก้าอี้ (BLE)</button>
-    <button class="btn btn-cam" onclick="startCamera()">2. เปิดกล้อง AI</button>
-  </div>
+    <script>
+        const SERVICE_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+        const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+        
+        let bleCharacteristic = null;
+        let lastState = null;
 
-  <div id="bleStatus">สถานะ BLE: ยังไม่ได้เชื่อมต่อ</div>
-  <div id="statusText">ท่านั่ง: รอเปิดกล้อง...</div>
-
-  <div class="video-container">
-    <video id="input_video" style="display:none;"></video>
-    <canvas id="output_canvas"></canvas>
-  </div>
-
-  <script>
-    let bleDevice, bleCharacteristic;
-    let isFsrError = false;
-    let isAiBad = false;
-    let aiMessage = "";
-
-    // 1. เชื่อมต่อ Web Bluetooth (BLE)
-    async function connectBLE() {
-      try {
-        bleDevice = await navigator.bluetooth.requestDevice({
-          filters: [{ name: 'SmartChair_ESP32' }],
-          optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
-        });
-
-        const server = await bleDevice.gatt.connect();
-        const service = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
-        bleCharacteristic = await service.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
-
-        // เปิดรับ Notification รับค่า 'E' (FSR ไม่ครบ) หรือ 'O' (ปกติ) จาก ESP32
-        await bleCharacteristic.startNotifications();
-        bleCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
-          const value = new TextDecoder().decode(event.target.value);
-          isFsrError = (value === 'E');
-          updateStatusUI();
-        });
-
-        document.getElementById("bleStatus").innerText = "สถานะ BLE: เชื่อมต่อสำเร็จเรียบร้อย! ✅";
-        document.getElementById("bleStatus").style.color = "green";
-      } catch (error) {
-        console.error(error);
-        document.getElementById("bleStatus").innerText = "สถานะ BLE: ล้มเหลว (" + error.message + ")";
-        document.getElementById("bleStatus").style.color = "red";
-      }
-    }
-
-    // ส่งสัญญาณ BLE ไปยัง ESP32 ('1' = ผิดท่า, '0' = ปกติ)
-    async function sendBLEData(data) {
-      if (bleCharacteristic) {
-        try {
-          const encoder = new TextEncoder();
-          await bleCharacteristic.writeValue(encoder.encode(data));
-        } catch (e) {
-          console.error("BLE Send Error:", e);
+        async function connectBLE() {
+            try {
+                document.getElementById('bleStatus').innerText = "กำลังค้นหาอุปกรณ์...";
+                const device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [SERVICE_UUID]
+                });
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+                
+                document.getElementById('bleStatus').innerText = "สถานะ BLE: เชื่อมต่อสำเร็จ ✓";
+                document.getElementById('startCamBtn').disabled = false;
+            } catch (error) {
+                document.getElementById('bleStatus').innerText = "การเชื่อมต่อขัดข้อง: " + error;
+            }
         }
-      }
-    }
 
-    // 2. ตั้งค่า MediaPipe Pose
-    const pose = new Pose({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
-    });
-
-    pose.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5
-    });
-
-    pose.onResults(onResults);
-
-    function onResults(results) {
-      const canvasElement = document.getElementById('output_canvas');
-      const canvasCtx = canvasElement.getContext('2d');
-      canvasElement.width = results.image.width;
-      canvasElement.height = results.image.height;
-
-      canvasCtx.save();
-      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-
-      if (results.poseLandmarks) {
-        const landmarks = results.poseLandmarks;
-
-        const leftEar = landmarks[7];
-        const rightEar = landmarks[8];
-        const leftShoulder = landmarks[11];
-        const rightShoulder = landmarks[12];
-
-        // ตรวจจับนั่งเอียง (Shoulder Tilt)
-        const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
-        const isTilt = shoulderDiff > 0.045;
-
-        // ตรวจจับหลังค่อม / ก้มคอ (Slouching)
-        const avgEarY = (leftEar.y + rightEar.y) / 2;
-        const avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2;
-        const neckDistance = avgShoulderY - avgEarY;
-        const isSlouch = neckDistance < 0.12;
-
-        isAiBad = isTilt || isSlouch;
-
-        if (isAiBad) {
-          if (isTilt && isSlouch) aiMessage = "เอียง + หลังค่อม ⚠️";
-          else if (isTilt) aiMessage = "นั่งเอียง ⚠️";
-          else if (isSlouch) aiMessage = "หลังค่อม / ก้มคอ ⚠️";
-          sendBLEData("1");
-        } else {
-          aiMessage = "ปกติ ✅";
-          sendBLEData("0");
+        async function sendBLE(data) {
+            if (bleCharacteristic && data !== lastState) {
+                lastState = data;
+                const enc = new TextEncoder();
+                await bleCharacteristic.writeValue(enc.encode(data));
+            }
         }
-      }
 
-      canvasCtx.restore();
-      updateStatusUI();
-    }
+        function startCamera() {
+            const videoElement = document.getElementById('webcam');
+            const canvasElement = document.getElementById('output_canvas');
+            const canvasCtx = canvasElement.getContext('2d');
+            const statusDiv = document.getElementById('status');
 
-    // 3. อัปเดตข้อความแสดงผลบนหน้าจอ
-    function updateStatusUI() {
-      const statusElement = document.getElementById("statusText");
+            const pose = new Pose({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+            });
 
-      if (isFsrError) {
-        statusElement.innerText = "ท่านั่ง: เซนเซอร์ถูกสัมผัสไม่ครบทุกจุด ⚠️";
-        statusElement.style.color = "red";
-      } else if (isAiBad) {
-        statusElement.innerText = "ท่านั่ง: " + aiMessage;
-        statusElement.style.color = "red";
-      } else {
-        statusElement.innerText = "ท่านั่ง: ปกติ ✅";
-        statusElement.style.color = "green";
-      }
-    }
+            pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            pose.onResults((results) => {
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+                canvasCtx.save();
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
 
-    // 4. สั่งเปิดใช้งานกล้อง
-    function startCamera() {
-      const videoElement = document.getElementById('input_video');
-      const camera = new Camera(videoElement, {
-        onFrame: async () => {
-          await pose.send({ image: videoElement });
-        },
-        width: 640,
-        height: 480
-      });
-      camera.start();
-      document.getElementById("statusText").innerText = "ท่านั่ง: กำลังประมวลผล...";
-    }
-  </script>
+                if (results.poseLandmarks) {
+                    const landmarks = results.poseLandmarks;
+                    const leftEar = landmarks[7], rightEar = landmarks[8];
+                    const leftShoulder = landmarks[11], rightShoulder = landmarks[12];
+
+                    const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
+                    const isTilt = shoulderDiff > 0.045;
+
+                    const avgEarY = (leftEar.y + rightEar.y) / 2;
+                    const avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+                    const isSlouch = (avgShoulderY - avgEarY) < 0.12;
+
+                    if (isTilt || isSlouch) {
+                        statusDiv.innerText = "ท่านั่ง: BAD POSTURE (ผิดท่า)";
+                        statusDiv.style.color = "red";
+                        sendBLE("1");
+                    } else {
+                        statusDiv.innerText = "ท่านั่ง: NORMAL (ปกติ)";
+                        statusDiv.style.color = "green";
+                        sendBLE("0");
+                    }
+                }
+                canvasCtx.restore();
+            });
+
+            const camera = new Camera(videoElement, {
+                onFrame: async () => { await pose.send({ image: videoElement }); },
+                width: 640, height: 480
+            });
+            camera.start();
+        }
+    </script>
 </body>
 </html>
