@@ -1,47 +1,48 @@
-function onResults(results) {
-  if (!results.poseLandmarks) return;
+let isFsrError = false; // ตัวแปรเก็บสถานะเซนเซอร์ FSR
 
-  const landmarks = results.poseLandmarks;
-
-  // ดึงพิกัดจุดที่จำเป็น
-  const leftEar = landmarks[7];
-  const rightEar = landmarks[8];
-  const leftShoulder = landmarks[11];
-  const rightShoulder = landmarks[12];
-
-  // -------------------------------------------------------------
-  // 1. ตรวจจับการนั่งเอียง (Shoulder Tilt)
-  // -------------------------------------------------------------
-  const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
-  const isTilt = shoulderDiff > 0.045; // ปรับค่าได้ (0.03 - 0.06) ยิ่งน้อยยิ่งไว
-
-  // -------------------------------------------------------------
-  // 2. ตรวจจับหลังค่อม / ก้มคอ (Slouching)
-  // -------------------------------------------------------------
-  const avgEarY = (leftEar.y + rightEar.y) / 2;
-  const avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2;
-  const neckDistance = avgShoulderY - avgEarY; // ระยะห่างจากหูถึงไหล่
-  
-  const isSlouch = neckDistance < 0.12; // หากระยะห่างน้อยกว่า 0.12 แสดงว่าหลังค่อม/ก้มคอ
-
-  // -------------------------------------------------------------
-  // สรุปสถานะและส่งข้อมูล BLE ไปยัง ESP32
-  // -------------------------------------------------------------
-  const isBadPosture = isTilt || isSlouch;
-  const statusElement = document.getElementById("statusText"); // ปรับ ID ให้ตรงกับหน้าเว็บของคุณ
-
-  if (isBadPosture) {
-    let msg = "ท่านั่ง: ";
-    if (isTilt && isSlouch) msg += "เอียง + หลังค่อม ⚠️";
-    else if (isTilt) msg += "นั่งเอียง ⚠️";
-    else if (isSlouch) msg += "หลังค่อม / ก้มคอ ⚠️";
+// ฟังก์ชันเมื่อเชื่อมต่อ BLE สำเร็จ ให้เปิดรับการแจ้งเตือนจาก ESP32
+async function connectBLE() {
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'SmartChair_ESP32' }],
+      optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
+    });
     
-    statusElement.innerText = msg;
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
+    bleCharacteristic = await service.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
+
+    // เริ่มรับ Notification จาก ESP32
+    await bleCharacteristic.startNotifications();
+    bleCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
+      const value = new TextDecoder().decode(event.target.value);
+      if (value === 'E') {
+        isFsrError = true;  // เซนเซอร์ไม่ถูกสัมผัสครบเกิน 5 วินาที
+      } else {
+        isFsrError = false; // เซนเซอร์สัมผัสปกติ
+      }
+      updateStatusUI();
+    });
+
+    document.getElementById("bleStatus").innerText = "สถานะ BLE: เชื่อมต่อสำเร็จเรียบร้อย! ✅";
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// ฟังก์ชันอัปเดตข้อความบนหน้าจอเว็บ
+function updateStatusUI(isAiBad = false, aiMsg = "") {
+  const statusElement = document.getElementById("statusText");
+
+  // หาก FSR เตือน (สัมผัสไม่ครบเกิน 5 วิ) จะขึ้นเตือนเรื่องเซนเซอร์เป็นลำดับแรก
+  if (isFsrError) {
+    statusElement.innerText = "ท่านั่ง: เซนเซอร์ถูกสัมผัสไม่ครบทุกจุด ⚠️";
     statusElement.style.color = "red";
-    sendBLEData("1"); // ส่ง '1' ไปแจ้ง ESP32 ว่านั่งผิดท่า
+  } else if (isAiBad) {
+    statusElement.innerText = "ท่านั่ง: " + aiMsg;
+    statusElement.style.color = "red";
   } else {
     statusElement.innerText = "ท่านั่ง: ปกติ ✅";
     statusElement.style.color = "green";
-    sendBLEData("0"); // ส่ง '0' ไปแจ้ง ESP32 ว่านั่งปกติ
   }
 }
