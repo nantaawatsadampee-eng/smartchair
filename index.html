@@ -3,81 +3,143 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Smart Chair Controller</title>
+    <title>Smart Chair Controller AI</title>
+    <!-- โหลดไลบรารี MediaPipe AI -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
     <style>
-        body { font-family: sans-serif; text-align: center; padding: 20px; }
-        button { padding: 12px 24px; font-size: 16px; margin: 10px; cursor: pointer; border-radius: 8px; border: none; }
-        .btn-connect { background-color: #008CBA; color: white; }
-        .status { font-weight: bold; margin-top: 15px; color: #333; }
+        body { font-family: Arial, sans-serif; text-align: center; background: #f4f4f9; padding: 15px; margin: 0; }
+        h2 { color: #333; margin-bottom: 10px; }
+        .btn { padding: 12px 20px; font-size: 16px; font-weight: bold; margin: 5px; cursor: pointer; border-radius: 8px; border: none; color: white; }
+        .btn-ble { background-color: #008CBA; }
+        .btn-cam { background-color: #4CAF50; }
+        .status { font-weight: bold; margin: 8px 0; font-size: 16px; color: #555; }
+        .video-container { position: relative; width: 100%; max-width: 480px; margin: 15px auto; border-radius: 10px; overflow: hidden; background: #000; }
+        video, canvas { width: 100%; display: block; }
+        canvas { position: absolute; top: 0; left: 0; }
     </style>
 </head>
 <body>
 
-    <h2>ระบบควบคุมเก้าอี้อัจฉริยะ (Smart Chair)</h2>
-    <button id="connectBtn" class="btn-connect" onclick="connectBLE()">เชื่อมต่อเก้าอี้ (BLE)</button>
-    <div id="status" class="status">สถานะ: ยังไม่ได้เชื่อมต่อ</div>
+    <h2>ระบบเก้าอี้อัจฉริยะ (Smart Chair AI)</h2>
+    <div>
+        <button id="bleBtn" class="btn btn-ble" onclick="connectBLE()">1. เชื่อมต่อเก้าอี้ (BLE)</button>
+        <button id="camBtn" class="btn btn-cam" onclick="startCamera()">2. เปิดกล้อง AI</button>
+    </div>
+    
+    <div id="status" class="status">สถานะ BLE: ยังไม่ได้เชื่อมต่อ</div>
+    <div id="postureStatus" class="status">ท่านั่ง: รอเปิดกล้อง...</div>
+
+    <div class="video-container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
 
     <script>
-        // UUID ต้องตรงกับในโค้ด ESP32
         const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
         const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
         let bluetoothDevice;
         let postureCharacteristic;
+        let lastBadPostureState = null;
 
+        // --- 1. ระบบ Bluetooth BLE ---
         async function connectBLE() {
             const statusText = document.getElementById("status");
-            const connectBtn = document.getElementById("connectBtn");
-
             try {
-                statusText.innerText = "สถานะ: กำลังค้นหาอุปกรณ์...";
-
-                // สแกนหาอุปกรณ์ชื่อ SmartChair_ESP32
+                statusText.innerText = "สถานะ BLE: กำลังค้นหา...";
                 bluetoothDevice = await navigator.bluetooth.requestDevice({
                     filters: [{ name: 'SmartChair_ESP32' }],
                     optionalServices: [SERVICE_UUID]
                 });
 
-                statusText.innerText = "สถานะ: กำลังเชื่อมต่อบลูทูธ...";
+                statusText.innerText = "สถานะ BLE: กำลังเชื่อมต่อ...";
                 const server = await bluetoothDevice.gatt.connect();
-
-                // เข้าถึง Service และ Characteristic
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 postureCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
-                statusText.innerText = "สถานะ: เชื่อมต่อสำเร็จเรียบร้อย!";
+                statusText.innerText = "สถานะ BLE: เชื่อมต่อสำเร็จเรียบร้อย! ✅";
                 statusText.style.color = "green";
-                connectBtn.style.backgroundColor = "#4CAF50";
+                document.getElementById("bleBtn").style.backgroundColor = "#2E7D32";
 
-                // เฝ้าระวังกรณีบลูทูธหลุด
-                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
-
+                bluetoothDevice.addEventListener('gattserverdisconnected', () => {
+                    statusText.innerText = "สถานะ BLE: ขาดการเชื่อมต่อ ❌";
+                    statusText.style.color = "red";
+                    postureCharacteristic = null;
+                });
             } catch (error) {
-                console.error("Error:", error);
-                statusText.innerText = "สถานะ: การเชื่อมต่อล้มเหลว (" + error.message + ")";
+                statusText.innerText = "สถานะ BLE: ล้มเหลว (" + error.message + ")";
                 statusText.style.color = "red";
             }
         }
 
-        function onDisconnected() {
-            const statusText = document.getElementById("status");
-            const connectBtn = document.getElementById("connectBtn");
-            
-            statusText.innerText = "สถานะ: บลูทูธขาดการเชื่อมต่อ";
-            statusText.style.color = "red";
-            connectBtn.style.backgroundColor = "#008CBA";
+        async function sendPostureToESP32(isBad) {
+            if (!postureCharacteristic || lastBadPostureState === isBad) return;
+            try {
+                lastBadPostureState = isBad;
+                const encoder = new TextEncoder();
+                await postureCharacteristic.writeValue(encoder.encode(isBad ? "1" : "0"));
+            } catch (e) {
+                console.error("BLE Send Error:", e);
+            }
         }
 
-        // ฟังก์ชันสำหรับส่งสถานะท่านั่งไปหา ESP32 ('1' = ท่าผิด, '0' = ท่าปกติ)
-        async function sendPostureStatus(isBadPosture) {
-            if (!postureCharacteristic) return;
-            try {
-                const encoder = new TextEncoder();
-                const data = encoder.encode(isBadPosture ? "1" : "0");
-                await postureCharacteristic.writeValue(data);
-            } catch (error) {
-                console.error("ส่งข้อมูลไม่สำเร็จ:", error);
+        // --- 2. ระบบกล้อง AI MediaPipe Pose ---
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const postureText = document.getElementById('postureStatus');
+
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        function startCamera() {
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await pose.send({ image: videoElement });
+                },
+                width: 480,
+                height: 360
+            });
+            camera.start();
+            document.getElementById("camBtn").innerText = "กล้องกำลังทำงาน...";
+        }
+
+        function onResults(results) {
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                const leftShoulder = results.poseLandmarks[11];
+                const rightShoulder = results.poseLandmarks[12];
+
+                // คำนวณความเอียงของไหล่
+                const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
+                const isBadPosture = shoulderDiff > 0.08;
+
+                if (isBadPosture) {
+                    postureText.innerText = "ท่านั่ง: นั่งเอียง / ผิดท่า ⚠️";
+                    postureText.style.color = "red";
+                    sendPostureToESP32(true);
+                } else {
+                    postureText.innerText = "ท่านั่ง: ปกติ ✅";
+                    postureText.style.color = "green";
+                    sendPostureToESP32(false);
+                }
             }
+            canvasCtx.restore();
         }
     </script>
 </body>
