@@ -4,26 +4,36 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Chair AI Web Edition</title>
+    <!-- MediaPipe Pose & Camera Utils -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
     <style>
-        body { font-family: sans-serif; text-align: center; background: #f4f4f9; padding: 20px; }
-        .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-        button { padding: 10px 20px; font-size: 16px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; background: #007bff; color: white; }
-        button:disabled { background: #ccc; }
-        #status { font-size: 24px; font-weight: bold; margin: 15px 0; color: #28a745; }
-        #video-container { position: relative; width: 100%; display: inline-block; }
-        video, canvas { width: 100%; border-radius: 8px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background: #f0f2f5; padding: 20px; margin: 0; }
+        .container { max-width: 650px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h2 { color: #333; margin-top: 0; }
+        .btn-group { margin: 15px 0; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+        button { padding: 12px 20px; font-size: 15px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; transition: 0.2s; color: white; }
+        .btn-ble { background: #007bff; }
+        .btn-ble:hover { background: #0056b3; }
+        .btn-cam { background: #28a745; }
+        .btn-cam:hover { background: #218838; }
+        #bleStatus { font-size: 14px; color: #666; margin-bottom: 10px; padding: 8px; background: #e9ecef; border-radius: 6px; }
+        #status { font-size: 26px; font-weight: bold; margin: 15px 0; color: #ffc107; }
+        #video-container { position: relative; width: 100%; border-radius: 10px; overflow: hidden; background: #000; margin-top: 15px; }
+        video, canvas { width: 100%; display: block; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>ระบบเก้าอี้อัจฉริยะ (Smart Chair Web)</h2>
-        <div>
-            <button id="connectBtn" onclick="connectBLE()">1. เชื่อมต่อ Bluetooth</button>
-            <button id="startCamBtn" onclick="startCamera()" disabled>2. เปิดกล้อง AI</button>
-        </div>
+        <h2>ระบบเก้าอี้อัจฉริยะ (Smart Chair Web Edition)</h2>
+        
         <div id="bleStatus">สถานะ BLE: ยังไม่ได้เชื่อมต่อ</div>
+        
+        <div class="btn-group">
+            <button class="btn-ble" onclick="connectBLE()">1. เชื่อมต่อ Bluetooth (ESP32)</button>
+            <button class="btn-cam" onclick="startCamera()">2. เปิดกล้อง AI ตรวจจับท่านั่ง</button>
+        </div>
+
         <div id="status">ท่านั่ง: รอเปิดกล้อง...</div>
         
         <div id="video-container">
@@ -38,79 +48,125 @@
         
         let bleCharacteristic = null;
         let lastState = null;
+        let cameraStarted = false;
 
+        // ฟังก์ชันเชื่อมต่อ BLE กับ ESP32
         async function connectBLE() {
+            const bleStatusDiv = document.getElementById('bleStatus');
             try {
-                document.getElementById('bleStatus').innerText = "กำลังค้นหาอุปกรณ์...";
+                bleStatusDiv.innerText = "กำลังค้นหาอุปกรณ์ Bluetooth...";
+                
                 const device = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
                     optionalServices: [SERVICE_UUID]
                 });
+
+                bleStatusDiv.innerText = "กำลังเชื่อมต่อกับ " + (device.name || "ESP32") + "...";
                 const server = await device.gatt.connect();
+                
+                // ค้นหา Service และ Characteristic
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
                 
-                document.getElementById('bleStatus').innerText = "สถานะ BLE: เชื่อมต่อสำเร็จ ✓";
-                document.getElementById('startCamBtn').disabled = false;
+                bleStatusDiv.innerText = "สถานะ BLE: เชื่อมต่อสำเร็จกับ " + (device.name || "SmartChair_ESP32") + " ✓";
+                bleStatusDiv.style.background = "#d4edda";
+                bleStatusDiv.style.color = "#155724";
             } catch (error) {
-                document.getElementById('bleStatus').innerText = "การเชื่อมต่อขัดข้อง: " + error;
+                console.error("BLE Error:", error);
+                bleStatusDiv.innerText = "การเชื่อมต่อขัดข้อง: " + error.message;
+                bleStatusDiv.style.background = "#f8d7da";
+                bleStatusDiv.style.color = "#721c24";
             }
         }
 
+        // ฟังก์ชันส่งข้อมูลไป ESP32
         async function sendBLE(data) {
             if (bleCharacteristic && data !== lastState) {
                 lastState = data;
-                const enc = new TextEncoder();
-                await bleCharacteristic.writeValue(enc.encode(data));
+                try {
+                    const enc = new TextEncoder();
+                    await bleCharacteristic.writeValue(enc.encode(data));
+                    console.log("ส่งข้อมูลสำเร็จ:", data);
+                } catch (e) {
+                    console.error("ส่ง BLE ล้มเหลว:", e);
+                }
             }
         }
 
+        // ฟังก์ชันเริ่มทำงานกล้อง AI
         function startCamera() {
+            if (cameraStarted) return;
+            cameraStarted = true;
+
             const videoElement = document.getElementById('webcam');
             const canvasElement = document.getElementById('output_canvas');
             const canvasCtx = canvasElement.getContext('2d');
             const statusDiv = document.getElementById('status');
 
+            statusDiv.innerText = "กำลังโหลดโมเดล AI...";
+
             const pose = new Pose({
                 locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
             });
 
-            pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            pose.setOptions({
+                modelComplexity: 1,
+                smoothLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
             pose.onResults((results) => {
                 canvasElement.width = videoElement.videoWidth;
                 canvasElement.height = videoElement.videoHeight;
                 canvasCtx.save();
                 canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                
+                // วาดภาพจากกล้องแบบกระจกเงา
+                canvasCtx.translate(canvasElement.width, 0);
+                canvasCtx.scale(-1, 1);
                 canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+                canvasCtx.restore();
 
                 if (results.poseLandmarks) {
                     const landmarks = results.poseLandmarks;
-                    const leftEar = landmarks[7], rightEar = landmarks[8];
-                    const leftShoulder = landmarks[11], rightShoulder = landmarks[12];
+                    const leftEar = landmarks[7];
+                    const rightEar = landmarks[8];
+                    const leftShoulder = landmarks[11];
+                    const rightShoulder = landmarks[12];
 
+                    // 1. นั่งเอียง (Shoulder Tilt)
                     const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
                     const isTilt = shoulderDiff > 0.045;
 
+                    // 2. หลังค่อม/ก้มคอ (Slouching)
                     const avgEarY = (leftEar.y + rightEar.y) / 2;
                     const avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2;
                     const isSlouch = (avgShoulderY - avgEarY) < 0.12;
 
-                    if (isTilt || isSlouch) {
+                    const isBad = isTilt || isSlouch;
+
+                    if (isBad) {
                         statusDiv.innerText = "ท่านั่ง: BAD POSTURE (ผิดท่า)";
-                        statusDiv.style.color = "red";
+                        statusDiv.style.color = "#dc3545";
                         sendBLE("1");
                     } else {
                         statusDiv.innerText = "ท่านั่ง: NORMAL (ปกติ)";
-                        statusDiv.style.color = "green";
+                        statusDiv.style.color = "#28a745";
                         sendBLE("0");
                     }
+                } else {
+                    statusDiv.innerText = "ท่านั่ง: ไม่พบผู้ใช้งานในกล้อง";
+                    statusDiv.style.color = "#ffc107";
                 }
-                canvasCtx.restore();
             });
 
             const camera = new Camera(videoElement, {
-                onFrame: async () => { await pose.send({ image: videoElement }); },
-                width: 640, height: 480
+                onFrame: async () => {
+                    await pose.send({ image: videoElement });
+                },
+                width: 640,
+                height: 480
             });
             camera.start();
         }
